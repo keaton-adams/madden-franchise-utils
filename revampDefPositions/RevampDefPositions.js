@@ -9,8 +9,11 @@ const gamePrompt = '24';
 const autoUnempty = false;
 const franchise = FranchiseUtils.selectFranchiseFile(gamePrompt,autoUnempty);
 
-async function generatePlayerMotivations(franchise, removeTags, excludeSchemeFit, includeCurrent) {
+async function revampPositions(franchise) {
   console.log("Doing the stuff...")
+  var edges = [];
+  var edgesIndex = 0;
+
   const playerTable = franchise.getTableByUniqueId(PLAYER_TABLE);
   await playerTable.readRecords();
 
@@ -19,12 +22,13 @@ async function generatePlayerMotivations(franchise, removeTags, excludeSchemeFit
       var player = {
         pos: playerTable.records[i]['Position'],
         age: playerTable.records[i]['Age'] ,
-        nam: playerTable.records[i]['LastName'],
+        name: playerTable.records[i]['LastName'],
+        team: playerTable.records[i]['TeamIndex'],
         ovr: playerTable.records[i]['OverallRating'],
-        arc: playerTable.records[i]['PlayerType'],
+        arch: playerTable.records[i]['PlayerType'],
         wgh: playerTable.records[i]['Weight'], // From a base of 160 (ie wgh val of 140 = 300lbs)
-        spd: playerTable.records[i]['OriginalSpeedRating'],
-        str: playerTable.records[i]['OriginalStrengthRating'],
+        spd: playerTable.records[i]['SpeedRating'],
+        str: playerTable.records[i]['StrengthRating'],
         fmv: playerTable.records[i]['FinesseMovesRating'],
         pmv: playerTable.records[i]['PowerMovesRating'],
         bsh: playerTable.records[i]['BlockSheddingRating'],
@@ -34,37 +38,96 @@ async function generatePlayerMotivations(franchise, removeTags, excludeSchemeFit
       var newPosition = player.pos;
       // Change DEs that should be interior DL to DT
       if (player.pos === 'LE' || player.pos === 'RE') {
-        if (player.arc === 'RunStopper' && player.wgh >= 110) {
+        // Player is RunStopper and 270lbs+, they should be DT
+        if (player.arch === 'DE_RunStopper' && player.wgh >= 110) {
           newPosition = 'DT';
+          // console.log(player);
+          // console.log("RUN STOPPER: Changing from ", player.pos, " to ", newPosition);
         }
-        else if (player.wgh >= 130) {
+        // Player is 290lbs+ or 270lbs+ with extremely high strength and blockshed (Aaron Donald), they should be a DT
+        else if (player.wgh >= 130 || (player.wgh >= 110 && player.str >= 95 && player.bsh >= 95)) {
           newPosition = 'DT';
+          // console.log(player);
+          // console.log("WEIGHT: Changing from ", player.pos, " to ", newPosition);
         }
       }
 
       // Change OLBs to either EDGE (outside rusher) or MLB (off-ball LB)
       if (player.pos === 'LOLB' || player.pos === 'ROLB') {
-        console.log(player);
 
-        if (i % 2 !== 0) {
-          playerTable.records[i]['Position'] = 'MLB';
+        // Player should be off-ball LB
+        if (player.arch === 'OLB_PassCoverage' || player.arch === 'OLB_RunStopper' || player.arch.includes("MLB_")) {
+          newPosition = 'MLB';
         }
+        // Player should be EDGE
         else {
           if (i % 2 !== 0) {
-            playerTable.records[i]['Position'] = 'LE';
+            newPosition = 'LE';
           }
           else {
-            playerTable.records[i]['Position'] = 'RE';
+            newPosition = 'RE';
           }
         }
-        console.log("Changing ", player.pos, " to: ", newPosition);
+        // if (playerTable.records[i]['YearsPro'] < 1){
+        //   console.log("\n", player);
+        //   console.log("Changing from ", player.pos, " to ", newPosition);
+        // }
       }
 
+      // Change the position
+      playerTable.records[i]['Position'] = newPosition;
 
-      // playerTable.records[i]['Position'] = newPosition;
+      // Add the player to the array for rebalancing
+      if (newPosition === 'LE'){
+        edges[edgesIndex] = {playerIndex: i, team: player.team, LE: 1, RE: 0, OVR: player.ovr};
+        edgesIndex++;
+      }
+      else if (newPosition === 'RE'){
+        edges[edgesIndex] = {playerIndex: i, team: player.team, LE: 0, RE: 1, OVR: player.ovr};
+        edgesIndex++;
+      }
     }
   }
+  await rebalanceEdges(edges);
   console.log("\nDone!\n")
+}
+
+async function rebalanceEdges(edges){
+  const playerTable = franchise.getTableByUniqueId(PLAYER_TABLE);
+  await playerTable.readRecords();
+
+  const visitedTeams = {};
+  edges.forEach(edge => {
+    const { team } = edge;
+    
+    // Check if the team index is already visited
+    if (!visitedTeams[team]) {
+      // Filter edges for this team
+      const teamEdges = edges.filter(e => e.team === team);
+      teamEdges.sort((a, b) => b.OVR - a.OVR);
+      // Randomize if we start by putting the best EDGE at LE or RE
+      let isRE = edge.playerIndex % 2 !== 0;
+      teamEdges.forEach(edgePlayer => {
+        if (isRE) {
+          edgePlayer.RE = 1;
+          edgePlayer.LE = 0;
+          playerTable.records[edgePlayer.playerIndex]['Position'] = 'RE';
+        }
+        else {
+          edgePlayer.RE = 0;
+          edgePlayer.LE = 1;
+          playerTable.records[edgePlayer.playerIndex]['Position'] = 'LE';
+        }
+        isRE = !isRE;
+      });
+      
+      // Perform actions on teamEdges, for example:
+      // console.log('Team edges:', teamEdges);
+  
+      // Mark this team index as visited
+      visitedTeams[team] = true;
+    }
+  });
 }
 
 franchise.on('ready', async function () {
@@ -79,11 +142,7 @@ franchise.on('ready', async function () {
     }
     
     try {
-      var removeTags = false;
-      var excludeSchemeFit = false;
-      var includeCurrent = false;
-
-      await generatePlayerMotivations(franchise, removeTags, excludeSchemeFit, includeCurrent);
+      await revampPositions(franchise);
     } catch (e) {
       console.log("******************************************************************************************")
       console.log(`FATAL ERROR!! Please report this message to Sinthros IMMEDIATELY - ${e}`)
